@@ -1063,9 +1063,12 @@ def guided_predict_pose(
     ss_inference_steps=None,
     ll_steps=25,
     num_pose_samples_per_pgs=None,
+    known_pointmap=None,
 ):
-    # Preprocess (once -- independent of seed)
-    pointmap_dict = pipeline.compute_pointmap(rgba)
+    # Preprocess (once -- independent of seed). known_pointmap (H,W,3 PyTorch3D-convention,
+    # NaN where invalid) overrides per-frame monocular MoGe -- used to feed MegaSAM's
+    # video-consistent, SMPL-aligned depth so the pose head sees temporally coherent geometry.
+    pointmap_dict = pipeline.compute_pointmap(rgba, pointmap=known_pointmap)
     pointmap = pointmap_dict["pointmap"]
     ss_input_dict = pipeline.preprocess_image(
         rgba, pipeline.ss_preprocessor, pointmap=pointmap,
@@ -1738,6 +1741,15 @@ def process_video(args):
             [image[..., :3], (mask.astype(np.uint8) * 255)[..., None]], axis=-1
         )
 
+        # Optional: known (MegaSAM) per-frame pointmap overriding monocular MoGe.
+        known_pointmap = None
+        if getattr(args, "pointmap_dir", None):
+            pm_path = os.path.join(args.pointmap_dir, f"{frame_idx:06d}_pointmap.npy")
+            if os.path.isfile(pm_path):
+                known_pointmap = torch.from_numpy(np.load(pm_path).astype(np.float32))
+            else:
+                logger.warning(f"  Frame {frame_idx}: pointmap {pm_path} missing -> falling back to MoGe")
+
         # Inject HFER and acceleration params
         hfer = calculate_hfer_robust(mask_path)
         if hasattr(inference, 'get_hfer'):
@@ -1784,6 +1796,7 @@ def process_video(args):
             batch_chunk_size=args.batch_chunk_size,
             ss_inference_steps=args.ss_inference_steps,
             ll_steps=args.ll_steps,
+            known_pointmap=known_pointmap,
             num_pose_samples_per_pgs=args.num_pose_samples_per_pgs,
         )
 
@@ -1939,6 +1952,10 @@ def main():
     parser.add_argument("--masks_root", default=None,
                         help="Override masks root directory. Default: <vid_dir>/video_segmentation/masks")
     parser.add_argument("--mesh", default=None, help="Override init mesh path")
+    parser.add_argument("--pointmap_dir", default=None,
+                        help="Dir with per-frame NNNNNN_pointmap.npy (H,W,3 PyTorch3D convention, NaN "
+                             "invalid). If set, these override per-frame monocular MoGe as the pose-head "
+                             "depth conditioning -- e.g. MegaSAM video-consistent SMPL-aligned depth.")
     parser.add_argument("--output_dir", default="guided_pose_output", help="Output directory")
     parser.add_argument("--device", default="cuda", help="Device")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
