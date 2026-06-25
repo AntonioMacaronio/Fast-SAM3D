@@ -257,7 +257,12 @@ class InferencePipelinePointMap(InferencePipeline):
         revised_scale[:] = mean_val
         return revised_scale
 
-    def compute_pointmap(self, image, pointmap=None):
+    def compute_pointmap(self, image, pointmap=None, known_intrinsics=None):
+        # known_intrinsics (3x3 normalized K: fx/W, fy/H, cx/W, cy/H) -- when a pointmap is supplied
+        # WITH the true scene intrinsics, use them instead of re-inferring K from the pointmap.
+        # BUGFIX: infer_intrinsics_from_pointmap() produced fx_norm~0.01 vs true ~1.03 (100x off) for
+        # our scene K, corrupting both render-IoU pose SELECTION and post-optimization. Passing the
+        # known camera fixes the object's along-ray placement.
         loaded_image = self.image_to_float(image)
         loaded_image = torch.from_numpy(loaded_image)
         loaded_mask = loaded_image[..., -1]
@@ -288,11 +293,12 @@ class InferencePipelinePointMap(InferencePipeline):
                     size=(loaded_image.shape[1], loaded_image.shape[2]),
                     mode="nearest",
                 ).squeeze(0).permute(1, 2, 0)
-            intrinsics = None
+            # use the supplied scene K if given; else mark for inference below
+            intrinsics = known_intrinsics
 
         points_tensor = points_tensor.permute(2, 0, 1)
-        points_tensor = self._clip_pointmap(points_tensor, loaded_mask) 
-        
+        points_tensor = self._clip_pointmap(points_tensor, loaded_mask)
+
         # Prepare the point map tensor
         point_map_tensor = {
             "pointmap": points_tensor,
@@ -304,15 +310,26 @@ class InferencePipelinePointMap(InferencePipeline):
                 points_tensor.permute(1, 2, 0), device=self.device
             )
             point_map_tensor["intrinsics"] = intrinsics_result["intrinsics"]
+        else:
+            # known scene intrinsics (normalized 3x3) -> skip inference, mark as known so
+            # post-optimization preserves the non-square focal (does not collapse fx=fy).
+            K_known = intrinsics if torch.is_tensor(intrinsics) else torch.as_tensor(intrinsics)
+            point_map_tensor["intrinsics"] = K_known.to(self.device).float()
+            point_map_tensor["intrinsics_known"] = True
 
         return point_map_tensor
 
     @torch.autograd.grad_mode.inference_mode(mode=False)
-    def run_post_optimization(self, mesh_glb, intrinsics, pose_dict, layout_input_dict, fill_mask_holes=False, force_alignment=False, fixed_scale=None, Enable_visible_ICP=False, Enable_shape_ICP=True):
+    def run_post_optimization(self, mesh_glb, intrinsics, pose_dict, layout_input_dict, fill_mask_holes=False, force_alignment=False, fixed_scale=None, Enable_visible_ICP=False, Enable_shape_ICP=True, intrinsics_known=False):
         intrinsics = intrinsics.clone()
-        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
-        re_focal = min(fx, fy)
-        intrinsics[0, 0], intrinsics[1, 1] = re_focal, re_focal
+        # BUGFIX (2b): for INFERRED intrinsics the focals are noisy, so collapsing fx=fy=min was a
+        # safe default. But with KNOWN scene intrinsics this would discard a real non-square focal
+        # (e.g. fx_norm 1.03 vs fy_norm 1.31) and re-introduce the depth/placement error we just
+        # fixed -- so preserve the true focals when the camera is known.
+        if not intrinsics_known:
+            fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+            re_focal = min(fx, fy)
+            intrinsics[0, 0], intrinsics[1, 1] = re_focal, re_focal
 
         # Convert pose_dict values to tensors if they are lists
         rotation = pose_dict["rotation"]
@@ -617,16 +634,17 @@ class InferencePipelinePointMap(InferencePipeline):
         stage2_inference_steps=None,
         use_stage1_distillation=False,
         use_stage2_distillation=False,
-        pointmap=None, 
+        pointmap=None,
         decode_formats=None,
-        estimate_plane=False, 
+        estimate_plane=False,
+        known_intrinsics=None,
     ) -> dict:
-        
+
         image = self.merge_image_and_mask(image, mask)
 
-        with self.device: 
+        with self.device:
             logger.info("compute_pointmap begin")
-            pointmap_dict = self.compute_pointmap(image, pointmap)
+            pointmap_dict = self.compute_pointmap(image, pointmap, known_intrinsics=known_intrinsics)
             pointmap = pointmap_dict["pointmap"]
             pts = type(self)._down_sample_img(pointmap)
             pts_colors = type(self)._down_sample_img(pointmap_dict["pts_color"]) 
@@ -710,11 +728,12 @@ class InferencePipelinePointMap(InferencePipeline):
                 ):
                     assert glb is not None, "require mesh to run postprocessing"
                     logger.info("Running layout post optimization method...")
-                    postprocessed_pose = self.run_post_optimization( 
+                    postprocessed_pose = self.run_post_optimization(
                         deepcopy(glb),
                         pointmap_dict["intrinsics"],
-                        ss_return_dict, 
-                        ss_input_dict, 
+                        ss_return_dict,
+                        ss_input_dict,
+                        intrinsics_known=bool(pointmap_dict.get("intrinsics_known", False)),
                     )
                     ss_return_dict.update(postprocessed_pose)
             except Exception as e:

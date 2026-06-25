@@ -128,8 +128,9 @@ class Inference:
         mask: Optional[Union[None, Image.Image, np.ndarray]], # mask
         seed: Optional[int] = None,
         pointmap=None,
+        known_intrinsics=None,
     ) -> dict:
-        
+
         image = self.merge_mask_to_rgba(image, mask)
 
         return self._pipeline.run(
@@ -139,10 +140,11 @@ class Inference:
             stage1_only=False,
             with_mesh_postprocess=False,
             with_texture_baking=False,
-            with_layout_postprocess=True, 
-            use_vertex_color=True, 
+            with_layout_postprocess=True,
+            use_vertex_color=True,
             stage1_inference_steps=None,
             pointmap=pointmap,
+            known_intrinsics=known_intrinsics,
         )
 
 def _yaw_pitch_r_fov_to_extrinsics_intrinsics(yaws, pitchs, rs, fovs):

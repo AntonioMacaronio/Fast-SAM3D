@@ -1064,11 +1064,15 @@ def guided_predict_pose(
     ll_steps=25,
     num_pose_samples_per_pgs=None,
     known_pointmap=None,
+    known_intrinsics=None,
 ):
     # Preprocess (once -- independent of seed). known_pointmap (H,W,3 PyTorch3D-convention,
     # NaN where invalid) overrides per-frame monocular MoGe -- used to feed MegaSAM's
     # video-consistent, SMPL-aligned depth so the pose head sees temporally coherent geometry.
-    pointmap_dict = pipeline.compute_pointmap(rgba, pointmap=known_pointmap)
+    # known_intrinsics (3x3 normalized scene K) overrides the depth-inferred K (BUGFIX: inferred K
+    # was ~100x off, corrupting render-IoU pose selection + post-optimization).
+    pointmap_dict = pipeline.compute_pointmap(rgba, pointmap=known_pointmap,
+                                              known_intrinsics=known_intrinsics)
     pointmap = pointmap_dict["pointmap"]
     ss_input_dict = pipeline.preprocess_image(
         rgba, pipeline.ss_preprocessor, pointmap=pointmap,
@@ -1077,6 +1081,7 @@ def guided_predict_pose(
     pointmap_shift = ss_input_dict.get("pointmap_shift", None)
 
     # Intrinsics
+    intrinsics_known = bool(pointmap_dict.get("intrinsics_known", False))
     if "intrinsics" in pointmap_dict:
         intrinsics = pointmap_dict["intrinsics"].detach().cpu()
     else:
@@ -1268,6 +1273,7 @@ def guided_predict_pose(
                 fixed_scale=fixed_scale,
                 Enable_visible_ICP=False,
                 Enable_shape_ICP=enable_shape_icp,
+                intrinsics_known=intrinsics_known,  # preserve non-square scene focal (BUGFIX 2b)
             )
             for k_ in ("translation", "rotation", "scale"):
                 if k_ in postopt:
@@ -1741,12 +1747,18 @@ def process_video(args):
             [image[..., :3], (mask.astype(np.uint8) * 255)[..., None]], axis=-1
         )
 
-        # Optional: known (MegaSAM) per-frame pointmap overriding monocular MoGe.
+        # Optional: known (MegaSAM/VGGT) per-frame pointmap overriding monocular MoGe.
         known_pointmap = None
+        known_intrinsics = None
         if getattr(args, "pointmap_dir", None):
             pm_path = os.path.join(args.pointmap_dir, f"{frame_idx:06d}_pointmap.npy")
             if os.path.isfile(pm_path):
                 known_pointmap = torch.from_numpy(np.load(pm_path).astype(np.float32))
+                # sidecar normalized scene intrinsics (3x3) -> use the TRUE camera, not depth-inferred
+                # (BUGFIX 2: inferred K was ~100x off). Optional: absent -> falls back to inference.
+                k_path = os.path.join(args.pointmap_dir, f"{frame_idx:06d}_intrinsics.npy")
+                if os.path.isfile(k_path):
+                    known_intrinsics = torch.from_numpy(np.load(k_path).astype(np.float32))
             else:
                 logger.warning(f"  Frame {frame_idx}: pointmap {pm_path} missing -> falling back to MoGe")
 
@@ -1797,6 +1809,7 @@ def process_video(args):
             ss_inference_steps=args.ss_inference_steps,
             ll_steps=args.ll_steps,
             known_pointmap=known_pointmap,
+            known_intrinsics=known_intrinsics,
             num_pose_samples_per_pgs=args.num_pose_samples_per_pgs,
         )
 
