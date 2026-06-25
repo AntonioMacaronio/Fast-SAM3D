@@ -746,8 +746,12 @@ class InferencePipelinePointMap(InferencePipeline):
             return {
                 **ss_return_dict,
                 **outputs,
-                "pointmap": pts.cpu().permute((1, 2, 0)),  
-                "pointmap_colors": pts_colors.cpu().permute((1, 2, 0)), 
+                "pointmap": pts.cpu().permute((1, 2, 0)),
+                "pointmap_colors": pts_colors.cpu().permute((1, 2, 0)),
+                # surface the camera K (known scene K or the inferred one) so callers (e.g. the
+                # init-layout writer) can persist intrinsics_normalized for the init frame.
+                "intrinsics": pointmap_dict.get("intrinsics"),
+                "intrinsics_known": bool(pointmap_dict.get("intrinsics_known", False)),
             }
 
     @staticmethod
