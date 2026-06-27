@@ -1372,6 +1372,10 @@ def _build_intrinsics_dict(intrinsics):
     if intrinsics is None:
         return None
     K = intrinsics.detach().cpu().numpy() if hasattr(intrinsics, "cpu") else np.array(intrinsics)
+    # K may carry leading batch dims (e.g. (1,3,3) from the known-intrinsics path or (B,3,3));
+    # collapse to the last 3x3 so K[0,0] is a scalar. (The known-camera fix stores intrinsics with
+    # an unsqueezed batch dim, which made the old bare K[0,0] indexing return a row -> float() crash.)
+    K = np.asarray(K, dtype=np.float64).reshape(-1, 3, 3)[0]
     return {
         "fx_norm": float(K[0, 0]),
         "fy_norm": float(K[1, 1]),
